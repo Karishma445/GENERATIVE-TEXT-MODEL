@@ -120,3 +120,5 @@ Show GPT-2 results for multiple topics.
 
 Include performance metrics (perplexity, BLEU, human evaluation).
 
+<img width="296" height="312" alt="Image" src="https://github.com/user-attachments/assets/b1ca5fb0-ceed-4ab5-9157-28cf3a66a991" />
+

@@ -1,0 +1,229 @@
+"""
+Text_Generation_GPT_and_LSTM.py
+
+Notebook-style Python script demonstrating two approaches to generate coherent paragraphs on specific topics:
+  1) LSTM (Keras) trained on a small custom dataset (or Project Gutenberg excerpts)
+  2) Transformer GPT-2 fine-tuning / prompt-based generation via Hugging Face Transformers
+
+Deliverable: a single-file notebook / script with examples, training loops, and generation functions.
+
+Instructions: Run in a Python environment with the required packages (listed in REQUIREMENTS). For GPT-2 fine-tuning, GPU is strongly recommended.
+
+REQUIREMENTS:
+# pip install tensorflow datasets tokenizers transformers sentencepiece torch tqdm
+
+Sections:
+- Setup & imports
+- Utility functions (data loading, cleaning, sequence creation)
+- LSTM model: build, train, generate
+- GPT-2: prompt-based generation and optional fine-tuning sketch
+- Example usage: generate paragraphs on given prompts
+- Tips for producing coherent paragraphs and evaluation
+
+Note: This file is structured to run in a linear Jupyter cell order, but also runs as a script.
+"""
+
+# ---------- Setup & Imports
+import os
+import re
+import json
+import random
+from pathlib import Path
+from typing import List
+
+# Basic ML imports
+import numpy as np
+
+# Use TensorFlow / Keras for LSTM
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Embedding, LSTM, Dense, Dropout
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+
+# Hugging Face for GPT-2
+try:
+    from transformers import (AutoTokenizer, AutoModelForCausalLM,
+                              Trainer, TrainingArguments, TextDataset, DataCollatorForLanguageModeling)
+    HF_AVAILABLE = True
+except Exception as e:
+    print("Transformers not available (fine-tuning GPT-2 disabled). To enable, pip install transformers torch sentencepiece." )
+    HF_AVAILABLE = False
+
+# For progress bars and small utilities
+from tqdm import tqdm
+
+# ---------------------- Utility functions ----------------------
+
+def clean_text(text: str) -> str:
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip()
+    return text
+
+
+def load_sample_corpus() -> List[str]:
+    """Return a tiny sample corpus of paragraphs. Replace with Gutenberg or a domain dataset for better results."""
+    sample = [
+        "Technology is reshaping how we live and work. Artificial intelligence powers recommendation systems, voice assistants, and autonomous machines.",
+        "Climate change presents urgent challenges. Mitigation and adaptation strategies are needed across nations to protect vulnerable ecosystems and communities.",
+        "Healthy eating and regular exercise contribute to physical and mental wellbeing. Small lifestyle changes make a big difference over time.",
+        "The history of art reflects cultural shifts. Paintings, sculptures, and architecture capture ideas and emotions across centuries.",
+        "Cities are hubs of innovation but face problems like congestion and pollution. Urban planners are designing sustainable, people-centered spaces.",
+    ]
+    return [clean_text(p) for p in sample]
+
+# ---------------------- LSTM approach ----------------------
+
+def prepare_lstm_data(texts: List[str], num_words=10000, seq_len=20):
+    tokenizer = Tokenizer(num_words=num_words, oov_token='<OOV>')
+    tokenizer.fit_on_texts(texts)
+    total_words = min(num_words, len(tokenizer.word_index) + 1)
+
+    input_sequences = []
+    for line in texts:
+        token_list = tokenizer.texts_to_sequences([line])[0]
+        for i in range(1, len(token_list)):
+            n_gram_sequence = token_list[:i+1]
+            input_sequences.append(n_gram_sequence)
+
+    max_seq_len = seq_len
+    input_sequences = [seq[-max_seq_len:] for seq in input_sequences if len(seq) > 1]
+
+    sequences = pad_sequences(input_sequences, maxlen=max_seq_len, padding='pre')
+    predictors = sequences[:, :-1]
+    labels = sequences[:, -1]
+
+    labels = tf.keras.utils.to_categorical(labels, num_classes=total_words)
+    return tokenizer, predictors, labels, total_words, max_seq_len
+
+
+def build_lstm_model(vocab_size, seq_len, embedding_dim=128, lstm_units=256):
+    model = Sequential()
+    model.add(Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=seq_len-1))
+    model.add(LSTM(lstm_units))
+    model.add(Dropout(0.2))
+    model.add(Dense(vocab_size, activation='softmax'))
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
+
+
+def generate_with_lstm(seed_text: str, tokenizer: Tokenizer, model, seq_len: int, num_words=50):
+    result = seed_text
+    for _ in range(num_words):
+        token_list = tokenizer.texts_to_sequences([result])[0]
+        token_list = token_list[-(seq_len-1):]
+        padded = pad_sequences([token_list], maxlen=seq_len-1, padding='pre')
+        predicted = model.predict(padded, verbose=0)
+        predicted_index = np.argmax(predicted, axis=-1)[0]
+        for word, index in tokenizer.word_index.items():
+            if index == predicted_index:
+                output_word = word
+                break
+        else:
+            output_word = ''
+        result += ' ' + output_word
+    return result
+
+# ---------------------- GPT-2 approach (prompt-based) ----------------------
+
+def gpt2_generate(prompt: str, model_name='gpt2', max_length=150, num_return_sequences=1, temperature=0.8, top_k=50, top_p=0.95):
+    if not HF_AVAILABLE:
+        raise RuntimeError('Transformers not available')
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    input_ids = tokenizer.encode(prompt, return_tensors='pt')
+    outputs = model.generate(
+        input_ids,
+        do_sample=True,
+        max_length=max_length,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        num_return_sequences=num_return_sequences,
+        pad_token_id=tokenizer.eos_token_id
+    )
+
+    texts = [tokenizer.decode(o, skip_special_tokens=True) for o in outputs]
+    return texts
+
+# Optional: short helper showing how to fine-tune GPT-2 on a small text file (sketch)
+
+def gpt2_finetune_sketch(train_file_path: str, model_name='gpt2', output_dir='./gpt2-finetuned', epochs=1, per_device_train_batch_size=1):
+    """
+    Sketch steps (not a full robust training script):
+      - Save training text as a plain .txt file
+      - Use transformers' Trainer API with TextDataset and DataCollatorForLanguageModeling
+    """
+    if not HF_AVAILABLE:
+        raise RuntimeError('Transformers not available')
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+    # Create dataset
+    dataset = TextDataset(tokenizer=tokenizer, file_path=train_file_path, block_size=128)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        overwrite_output_dir=True,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=per_device_train_batch_size,
+        save_steps=500,
+        save_total_limit=2,
+        logging_steps=100
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_collator=data_collator,
+        train_dataset=dataset
+    )
+
+    trainer.train()
+    trainer.save_model(output_dir)
+    return output_dir
+
+# ---------------------- Example usage ----------------------
+
+def example_lstm_workflow():
+    print('Preparing LSTM demo...')
+    texts = load_sample_corpus()
+    tokenizer, predictors, labels, vocab_size, seq_len = prepare_lstm_data(texts, num_words=2000, seq_len=10)
+    print(f'Vocab size (used): {vocab_size}, seq_len: {seq_len}')
+    model = build_lstm_model(vocab_size, seq_len, embedding_dim=64, lstm_units=128)
+    # Quick training (for demo only) - increase epochs for better text
+    model.fit(predictors, labels, epochs=50, batch_size=16, verbose=0)
+
+    seed = 'Artificial intelligence powers'
+    gen = generate_with_lstm(seed, tokenizer, model, seq_len, num_words=30)
+    print('\nLSTM generated paragraph:')
+    print(gen)
+
+
+def example_gpt2_demo():
+    if not HF_AVAILABLE:
+        print('Transformers not available; skipping GPT-2 demo.')
+        return
+    prompt = 'Write a coherent paragraph about the benefits of daily exercise:'
+    outs = gpt2_generate(prompt, model_name='gpt2', max_length=120, num_return_sequences=1)
+    print('\nGPT-2 generated paragraph:')
+    print(outs[0])
+
+# ---------------------- If run as a script ----------------------
+if __name__ == '__main__':
+    # Run LSTM example
+    example_lstm_workflow()
+    # Run GPT-2 example if available
+    example_gpt2_demo()
+
+# ---------------------- Tips and notes ----------------------
+# - LSTM approach: works on limited corpora, needs lots of data (tens of thousands of sentences) for truly coherent paragraphs.
+# - GPT-2 approach: use prompt engineering (system + few-shot examples) to get coherent paragraphs out-of-the-box. Fine-tuning yields domain-specific style.
+# - For internships: provide a small report (README) describing dataset, training hyperparams, sample outputs, and evaluation (perplexity, human review).
+# - To persist results: save trained model weights and tokenizer files; include generation examples in the notebook for the evaluator.
+
+# End of file
